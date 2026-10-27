@@ -1,0 +1,11 @@
+{
+  "name": "micronutri",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Diario dei micronutrienti da frutta, verdura, legumi e cereali con obiettivi basati sulle evidenze (EBM).",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

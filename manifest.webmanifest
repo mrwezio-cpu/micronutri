@@ -1,0 +1,17 @@
+{
+  "name": "MicroNutri – micronutrienti e prevenzione",
+  "short_name": "MicroNutri",
+  "description": "Diario dei micronutrienti di frutta, verdura, legumi e cereali con obiettivi basati sulle evidenze scientifiche.",
+  "lang": "it",
+  "start_url": "./#/oggi",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f5ef",
+  "theme_color": "#2d7a4c",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
