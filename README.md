@@ -5,6 +5,8 @@ Ogni sera un promemoria chiede quali frutta, verdura, legumi, cereali e semi hai
 l'app stima vitamine, minerali, fibre, omega-3 e composti bioattivi, dice cosa hai coperto e cosa manca,
 e consiglia alimenti e porzioni per colmare le lacune. Gli obiettivi sono basati sulle evidenze (EBM).
 
+**Prova online:** https://mrwezio-cpu.github.io/micronutri/
+
 ## Avvio
 
 Serve solo Node.js (nessuna dipendenza da installare):
