@@ -2,8 +2,8 @@
 // consigli alimentari. Nessuna dipendenza dal DOM: è testabile con node --test.
 
 import { FOODS, FOOD_BY_ID, FOOD_GROUPS, inSeason } from './data/foods.js';
-import { NUTRIENTS, getTargets, UL } from './data/nutrients.js';
-import { SUPPLEMENTS, SUN, SALT, allowedAnimal, allows } from './data/profile.js';
+import { NUTRIENTS, TARGET_KEYS, getTargets, UL } from './data/nutrients.js';
+import { SUPPLEMENTS, SUN, SALT, WATER, allowedAnimal, allows, freqPerDay, waterMinerals } from './data/profile.js';
 import { addDays, parseKey } from './dates.js';
 
 export const KEYS = NUTRIENTS.map(n => n.key);
@@ -51,8 +51,7 @@ function emptyGroups() {
 export function animalBreakdown(profile) {
   return allowedAnimal(profile)
     .map(a => {
-      const f = Number(profile.freq?.[a.key]) || 0;
-      const gramsPerDay = a.per === 'giorno' ? f * a.g : (f * a.g) / 7;
+      const gramsPerDay = freqPerDay(profile, a) * a.g;
       return { key: a.key, label: a.label, c: addInto(zero(), a.n, gramsPerDay / 100) };
     })
     .filter(a => Object.values(a.c).some(v => v > 0));
@@ -77,6 +76,9 @@ export function baseline(profile, key) {
   for (const a of animalBreakdown(profile)) addInto(profilo, a.c);
   const integratori = supplementTotals(profile);
   const altro = zero();
+  const water = waterMinerals(profile);
+  altro.calcio += water.calcio;
+  altro.magnesio += water.magnesio;
   const salt = SALT.find(s => s.key === profile.sale);
   if (salt) altro.iodio += salt.iodio;
   if (isSunSeason(key)) {
@@ -137,16 +139,20 @@ export function statusOf(pct) {
   return pct >= 100 ? 'ok' : pct >= 70 ? 'quasi' : 'basso';
 }
 
+// status: 'ok' | 'quasi' | 'basso' per i fabbisogni; 'rif' per i riferimenti; 'info' senza obiettivo.
 export function evaluate(totals, targets, supplements = {}) {
   return NUTRIENTS.map(n => {
     const value = totals[n.key] || 0;
-    const target = targets[n.key];
+    const target = n.kind === 'info' ? null : targets[n.key];
     const pct = target ? (value / target) * 100 : 0;
     const ul = UL[n.key] || null;
     const checked = ul?.scope === 'integratori' ? supplements[n.key] || 0 : value;
-    return { ...n, value, target, pct, status: statusOf(pct), ul, over: !!ul && checked > ul.value };
+    const status = n.kind === 'target' ? statusOf(pct) : n.kind === 'riferimento' ? 'rif' : 'info';
+    return { ...n, value, target, pct, status, ul, over: !!ul && checked > ul.value };
   });
 }
+
+export const countReached = evals => evals.filter(e => e.kind === 'target' && e.status === 'ok').length;
 
 // daily: gruppi del giorno (o somma della settimana) diviso dailyDays; week: somma 7 giorni.
 export function evaluateGroups({ daily, dailyDays, week, weekDays }) {
@@ -168,9 +174,15 @@ export function evaluateGroups({ daily, dailyDays, week, weekDays }) {
 
 // ---------- Consigli ----------
 
-// Nutrienti che i vegetali non possono coprire bene: gestiti con consigli testuali.
-const RECO_SKIP = new Set(['b12', 'vitD', 'epadha', 'iodio']);
-const RECO_WEIGHTS = { fibre: 1.5, polifenoli: 0.6, luteina: 0.4, licopene: 0.3 };
+// Pesi nei consigli: 1 per i fabbisogni, salvo eccezioni; i composti non essenziali pesano poco
+// (consigliamo alimenti vari, non la caccia a una molecola). 0 = non considerato.
+// B12, vitamina D, EPA/DHA e iodio i vegetali non li coprono: se ne occupano i consigli testuali.
+const RECO_WEIGHTS = {
+  b12: 0, vitD: 0, epadha: 0, iodio: 0,
+  fibre: 1.5,
+  betaglucani: 0.4, polifenoli: 0.3, luteina: 0.2, licopene: 0.15,
+};
+const recoWeight = k => RECO_WEIGHTS[k] ?? (TARGET_KEYS.includes(k) ? 1 : 0);
 const GROUP_WEIGHTS = { fv: 1.2, legumi: 1, integrali: 1, secca: 0.8, foglia: 0.6, crucifere: 0.6, bosco: 0.4 };
 const MIN_SCORE = 0.15;
 const OUT_OF_SEASON = 0.3;
@@ -200,7 +212,7 @@ export function recommend(state, key, mode = 'giorno', limit = 6) {
   const week = computeWeek(state, key);
   const base = mode === 'settimana' && week.loggedDays ? week.totals : day.totals;
   const gaps = {};
-  for (const k of KEYS) if (!RECO_SKIP.has(k)) gaps[k] = Math.max(0, targets[k] - base[k]);
+  for (const k of KEYS) if (recoWeight(k) > 0 && targets[k]) gaps[k] = Math.max(0, targets[k] - base[k]);
   const gGaps = groupGaps(mode, day, week);
   const running = { ...base };
   const picks = [];
@@ -216,7 +228,7 @@ export function recommend(state, key, mode = 'giorno', limit = 6) {
       if (exceeds) continue;
       const gc = groupContribution(f, 1);
       let score = 0;
-      for (const k in gaps) if (gaps[k] > 0 && c[k]) score += ((RECO_WEIGHTS[k] ?? 1) * Math.min(gaps[k], c[k])) / targets[k];
+      for (const k in gaps) if (gaps[k] > 0 && c[k]) score += (recoWeight(k) * Math.min(gaps[k], c[k])) / targets[k];
       for (const k in gGaps) if (gGaps[k].gap > 0 && gc[k]) score += (GROUP_WEIGHTS[k] * Math.min(gGaps[k].gap, gc[k])) / gGaps[k].norm;
       score *= f.reco;
       if (!inSeason(f, month)) score *= OUT_OF_SEASON;
@@ -242,8 +254,8 @@ export function recommend(state, key, mode = 'giorno', limit = 6) {
     perCategory[best.food.cat] = (perCategory[best.food.cat] || 0) + 1;
   }
 
-  const count = t => KEYS.filter(k => t[k] >= targets[k]).length;
-  return { mode, picks, before: count(base), after: count(running), total: KEYS.length };
+  const count = t => TARGET_KEYS.filter(k => t[k] >= targets[k]).length;
+  return { mode, picks, before: count(base), after: count(running), total: TARGET_KEYS.length };
 }
 
 // Consigli testuali per i nutrienti critici e per il profilo (non risolvibili con un alimento).
@@ -288,7 +300,7 @@ export function adviceCards(state, key, evals, week) {
     cards.push(allows(p, 'pesce')
       ? {
         level: 'media', title: 'Omega-3 EPA e DHA',
-        text: 'Punta a 2 porzioni di pesce a settimana, di cui almeno una di pesce grasso (sardine, alici, sgombro, salmone): sono le fonti più ricche. Le specie piccole come alici e sardine contengono meno mercurio.',
+        text: 'Punta a 2 porzioni di pesce a settimana, di cui almeno una di pesce grasso (sardine, alici, sgombro, salmone): sono le fonti più ricche. Le specie piccole come alici e sardine contengono meno mercurio. Le capsule di omega-3 non hanno un beneficio preventivo dimostrato per tutti; le dosi alte (per i trigliceridi) solo su indicazione medica.',
       }
       : {
         level: 'media', title: 'Omega-3 in una dieta senza pesce',
@@ -306,16 +318,55 @@ export function adviceCards(state, key, evals, week) {
   }
 
   if (ev.calcio.status === 'basso') {
+    const water = waterMinerals(p);
+    const calcica = WATER.find(w => w.key === 'calcica');
+    const litri = water.litri || 1.5;
+    const gain = Math.round((calcica.calcio - water.perL.calcio) * litri / 10) * 10;
+    const waterTip = water.perL.calcio < 150 && gain > 0
+      ? `Bevendo un'acqua ricca di calcio (circa ${calcica.calcio} mg/L) al posto della tua, con ${String(litri).replace('.', ',')} litri al giorno aggiungeresti circa ${gain} mg di calcio. `
+      : '';
     cards.push({
       level: 'media', title: 'Calcio',
-      text: 'Oltre ai latticini: acque minerali "calciche" (più di 150 mg/L: un litro può dare 300–400 mg), cavoli e cime di rapa, tofu preparato con calcio, bevande vegetali arricchite, mandorle e sesamo.',
+      text: `${waterTip}Altre fonti oltre ai latticini: cavoli e cime di rapa, tofu preparato con calcio, bevande vegetali arricchite, mandorle e sesamo.`,
     });
   }
 
   if (ev.ferro.status !== 'ok' && (p.sesso === 'F' || p.dieta === 'vegetariano' || p.dieta === 'vegano')) {
     cards.push({
       level: 'info', title: 'Come assorbire più ferro',
-      text: 'Abbina ai pasti con legumi e verdure una fonte di vitamina C (peperoni, agrumi, kiwi, prezzemolo) e sposta tè e caffè lontano dai pasti. In caso di stanchezza persistente o ciclo abbondante chiedi al medico di controllare emocromo e ferritina.',
+      text: 'Abbina ai pasti con legumi e verdure una fonte di vitamina C (peperoni, agrumi, kiwi, prezzemolo) e sposta tè e caffè lontano dai pasti. Con stanchezza persistente, ciclo abbondante o donazioni di sangue chiedi al medico di controllare emocromo e ferritina: il ferro può aiutare anche con riserve basse ed emoglobina normale, ma non va preso senza esami.',
+    });
+  }
+
+  if (ev.colina.status === 'basso') {
+    cards.push({
+      level: 'info', title: 'Colina',
+      text: allows(p, 'uova')
+        ? 'Le uova sono la fonte più ricca (circa 150 mg l\'una); seguono pesce, carne, soia, legumi, quinoa e cavolfiore. Raggiungere il fabbisogno conta per fegato e muscoli; andare oltre non migliora la memoria.'
+        : 'Nella dieta vegana le fonti migliori sono soia (edamame, tofu), legumi, quinoa, frutta secca, semi e cavolfiore. Raggiungere il fabbisogno conta per fegato e muscoli; andare oltre non migliora la memoria.',
+    });
+  }
+
+  if (p.forza && !(supp.creatina > 0)) {
+    const veg = p.dieta === 'vegetariano' || p.dieta === 'vegano';
+    cards.push({
+      level: 'info', title: 'Creatina e allenamento di forza',
+      text: `Per chi si allena contro resistenza la creatina monoidrato (3–5 g al giorno, senza fase di carico) è uno degli integratori con le prove più solide su forza e potenza, anche senza carenza.${veg ? ' Chi non mangia carne e pesce ha riserve più basse e di solito risponde di più.' : ''} Può far aumentare il peso di 1–2 kg (acqua). Con malattie renali parlane prima con il medico.`,
+    });
+  }
+
+  if (supp.citicolina > 0) {
+    cards.push({
+      level: 'info', title: 'Citicolina e memoria',
+      text: 'Nel 2024 l\'EFSA ha concluso che non è dimostrato un effetto della citicolina sul mantenimento o miglioramento della memoria. Uno studio su 100 persone di 50–85 anni (500 mg/die per 12 settimane) ha visto un miglioramento della sola memoria episodica. Non è certamente inefficace, ma non è un beneficio affidabile, soprattutto in chi è giovane e sano.',
+    });
+  }
+
+  const fegato = allowedAnimal(p).find(a => a.key === 'fegato');
+  if (fegato && freqPerDay(p, fegato) > 0 && p.sesso === 'F' && (p.condizione === 'gravidanza' || p.condizione === 'cerco')) {
+    cards.push({
+      level: 'alta', title: 'Fegato e gravidanza',
+      text: 'Il fegato contiene moltissima vitamina A preformata (retinolo), che in eccesso può nuocere al feto: in gravidanza, e se la cerchi, è consigliato evitarlo. Parlane con il ginecologo.',
     });
   }
 
@@ -327,8 +378,9 @@ export function adviceCards(state, key, evals, week) {
   }
 
   if (allows(p, 'carne')) {
-    const salumi = Number(p.freq?.salumi) || 0;
-    const rossa = Number(p.freq?.rossa) || 0;
+    const perWeek = key => Math.round(freqPerDay(p, allowedAnimal(p).find(a => a.key === key)) * 700) / 100;
+    const salumi = perWeek('salumi');
+    const rossa = perWeek('rossa');
     if (salumi >= 2) {
       cards.push({
         level: 'media', title: 'Carni lavorate',

@@ -377,3 +377,34 @@ p { margin: 0 0 10px; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ---------- composti non essenziali, frequenze, acqua, integratori ---------- */
+.badge.st-rif { background: var(--surface-2); color: var(--muted); }
+.kind-riferimento .segm, .kind-riferimento .segm + .segm { opacity: 0.55; }
+.nname .benefit { display: block; font-weight: 500; font-size: 12.5px; color: var(--muted); }
+.more-link { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; text-decoration: none; }
+
+.freq-ctrl { display: grid; justify-items: end; gap: 6px; flex: none; }
+.period {
+  font: 13px var(--font); color: var(--ink); background: var(--surface-2); border: 0;
+  border-radius: 8px; padding: 6px 8px; max-width: 150px;
+}
+.water-label { display: grid; gap: 8px; margin-top: 10px; font-size: 14px; }
+.water-label label { display: grid; grid-template-columns: 76px 100px auto; align-items: center; gap: 8px; }
+.field .water-label input {
+  width: 100px; font: 16px var(--font); color: var(--ink); background: var(--surface-2);
+  border: 1px solid transparent; border-radius: 10px; padding: 8px 10px;
+}
+.sublabel { margin: 14px 0 8px; font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+.nut h3 { font-size: 16.5px; }
+.nut-dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 4px 0 10px; font-size: 14.5px; }
+.nut-dl dt { color: var(--muted); font-weight: 600; }
+.nut-dl dd { margin: 0; }
+.ev-alta { background: var(--ok-soft); color: var(--ok); }
+.ev-ins { background: var(--low-soft); color: var(--low); }
+
+@media (max-width: 420px) {
+  .nut-dl { grid-template-columns: 1fr; gap: 2px; }
+  .nut-dl dd { margin-bottom: 6px; }
+}

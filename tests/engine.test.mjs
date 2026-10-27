@@ -115,3 +115,67 @@ test('stagionalità: niente anguria a gennaio, sì in estate', async () => {
   const rec = recommend(s, WINTER, 'giorno', 8);
   assert.ok(!rec.picks.some(p => p.food.id === 'anguria' || p.food.id === 'pomodori'));
 });
+
+test('frequenze: una porzione al mese vale 1/30 al giorno, i profili vecchi restano validi', async () => {
+  const { normalizeProfile, freqPerDay } = await import('../js/data/profile.js');
+  const rossa = ANIMAL.find(a => a.key === 'rossa');
+  const mensile = stateWith({ dieta: 'onnivoro', freq: { rossa: { n: 1, per: 'mese' } }, acqua: { litri: 0 } });
+  const day = computeDay(mensile, WINTER);
+  assert.ok(Math.abs(day.sources.profilo.b12 - 1.9 / 30) < 1e-9);
+  assert.ok(Math.abs(day.sources.profilo.creatina - 0.4 / 30) < 1e-9);
+  const vecchio = normalizeProfile({ sesso: 'F', eta: 30, dieta: 'onnivoro', freq: { rossa: 2, latte: 1 } });
+  assert.deepEqual(vecchio.freq.rossa, { n: 2, per: 'settimana' });
+  assert.deepEqual(vecchio.freq.latte, { n: 1, per: 'giorno' });
+  assert.equal(vecchio.freq.fegato.n, 0);
+  assert.equal(vecchio.acqua.tipo, 'oligo');
+  assert.ok(Math.abs(freqPerDay(vecchio, rossa) - 2 / 7) < 1e-12);
+});
+
+test('acqua: calcio e magnesio per tipo o da etichetta', () => {
+  const oligo = computeDay(stateWith({ dieta: 'vegano', acqua: { litri: 1.5, tipo: 'oligo' } }), WINTER);
+  assert.equal(oligo.sources.altro.calcio, 35 * 1.5);
+  assert.equal(oligo.sources.altro.magnesio, 8 * 1.5);
+  const etichetta = computeDay(stateWith({ dieta: 'vegano', acqua: { litri: 2, tipo: 'etichetta', calcio: 322, magnesio: 19 } }), WINTER);
+  assert.equal(etichetta.sources.altro.calcio, 644);
+  assert.equal(etichetta.sources.altro.magnesio, 38);
+});
+
+test('colina: obiettivo EFSA, conta negli obiettivi; i bioattivi no', async () => {
+  const { TARGET_KEYS } = await import('../js/data/nutrients.js');
+  assert.equal(getTargets({ ...defaultProfile(), sesso: 'F', condizione: 'allattamento' }).colina, 520);
+  assert.ok(TARGET_KEYS.includes('colina'));
+  for (const k of ['polifenoli', 'luteina', 'betaglucani', 'creatina', 'curcumina']) assert.ok(!TARGET_KEYS.includes(k), k);
+  const s = stateWith({ dieta: 'onnivoro' });
+  const evals = evaluate(computeDay(s, WINTER).totals, getTargets(s.profile));
+  const byKey = Object.fromEntries(evals.map(e => [e.key, e]));
+  assert.equal(byKey.creatina.status, 'info');
+  assert.equal(byKey.creatina.target, null);
+  assert.equal(byKey.betaglucani.status, 'rif');
+  assert.ok(['ok', 'quasi', 'basso'].includes(byKey.colina.status));
+  const rec = recommend(s, WINTER, 'giorno');
+  assert.equal(rec.total, TARGET_KEYS.length);
+});
+
+test('integratori nuovi: creatina, citicolina come colina, psillio come fibre', () => {
+  const s = stateWith({ dieta: 'vegano', integratori: { creatina: 3, citicolina: 500, psillio: 5 } });
+  const day = computeDay(s, WINTER);
+  assert.equal(day.sources.integratori.creatina, 3);
+  assert.equal(day.sources.integratori.colina, 100);
+  assert.equal(day.sources.integratori.fibre, 4);
+});
+
+test('consigli testuali: creatina solo a chi si allena, fegato da evitare in gravidanza', () => {
+  const cardsFor = profile => {
+    const s = stateWith(profile);
+    const evals = evaluate(computeDay(s, WINTER).totals, getTargets(s.profile));
+    return adviceCards(s, WINTER, evals, computeWeek(s, WINTER)).map(c => c.title);
+  };
+  assert.ok(cardsFor({ dieta: 'vegano', forza: true }).includes('Creatina e allenamento di forza'));
+  assert.ok(!cardsFor({ dieta: 'vegano', forza: false }).includes('Creatina e allenamento di forza'));
+  assert.ok(cardsFor({ dieta: 'onnivoro', sesso: 'F', eta: 30, condizione: 'gravidanza', freq: { fegato: { n: 1, per: 'mese' } } }).includes('Fegato e gravidanza'));
+});
+
+test('beta-glucani: 70 g di avena coprono circa i 3 g di riferimento', () => {
+  const c = foodContribution(FOOD_BY_ID.avena, 70 / 40);
+  assert.ok(Math.abs(c.betaglucani - 3.15) < 1e-9);
+});

@@ -1,12 +1,17 @@
 import { load, save, defaultState, isValidBackup } from './store.js';
 import { dateKey, addDays, dayLabel } from './dates.js';
 import { FOODS, FOOD_BY_ID, CATEGORIES } from './data/foods.js';
-import { NUTRIENT_GROUPS, NUTRIENT_BY_KEY, EVIDENCE, getTargets } from './data/nutrients.js';
-import { ANIMAL, SUPPLEMENTS, DIETS, SUN, SALT, CONDITIONS, defaultProfile, dietOf, allowedAnimal } from './data/profile.js';
-import { computeDay, computeWeek, evaluate, evaluateGroups, recommend, adviceCards, animalBreakdown } from './engine.js';
+import { NUTRIENT_GROUPS, NUTRIENT_BY_KEY, TARGET_KEYS, EVIDENCE, getTargets } from './data/nutrients.js';
+import {
+  ANIMAL, SUPPLEMENTS, DIETS, SUN, SALT, WATER, PERIODS, CONDITIONS,
+  defaultProfile, normalizeProfile, dietOf, dietFreq, allowedAnimal, freqOf, waterMinerals,
+} from './data/profile.js';
+import { computeDay, computeWeek, evaluate, evaluateGroups, recommend, adviceCards, animalBreakdown, countReached } from './engine.js';
+import { NUTRACEUTICALS } from './data/nutraceuticals.js';
 import * as notify from './notifications.js';
 
 let state = load();
+state.profile = normalizeProfile(state.profile);
 
 const ui = {
   date: dateKey(),
@@ -79,7 +84,7 @@ const icon = (name, cls = '') => `<svg class="ico ${cls}" viewBox="0 0 24 24" ar
 
 // ---------- routing ----------
 
-const VIEWS = { oggi: viewOggi, checkin: viewCheckin, analisi: viewAnalisi, consigli: viewConsigli, profilo: viewProfilo, info: viewInfo, benvenuto: viewBenvenuto };
+const VIEWS = { oggi: viewOggi, checkin: viewCheckin, analisi: viewAnalisi, consigli: viewConsigli, integratori: viewIntegratori, profilo: viewProfilo, info: viewInfo, benvenuto: viewBenvenuto };
 const TABS = [
   { route: 'oggi', label: 'Diario', icon: 'diario' },
   { route: 'analisi', label: 'Analisi', icon: 'analisi' },
@@ -105,8 +110,9 @@ function render() {
   const fullscreen = name === 'benvenuto' || name === 'checkin';
   tabbar.hidden = fullscreen;
   document.body.classList.toggle('no-tabs', fullscreen);
+  const activeTab = name === 'integratori' ? 'consigli' : name;
   tabbar.innerHTML = TABS.map(t => `
-    <a href="#/${t.route}" class="tab ${name === t.route ? 'on' : ''}" ${name === t.route ? 'aria-current="page"' : ''}>
+    <a href="#/${t.route}" class="tab ${activeTab === t.route ? 'on' : ''}" ${activeTab === t.route ? 'aria-current="page"' : ''}>
       ${icon(t.icon)}<span>${t.label}</span>
     </a>`).join('');
   if (ui.lastRoute !== name) {
@@ -143,18 +149,19 @@ function ring(label, pctValue, main, sub) {
   </div>`;
 }
 
-const STATUS_LABEL = { ok: 'Raggiunto', quasi: 'Quasi', basso: 'Basso' };
+const STATUS_LABEL = { ok: 'Raggiunto', quasi: 'Quasi', basso: 'Basso', rif: 'Rispetto alla dose di riferimento' };
 
 function badge(e) {
   if (e.over) return `<span class="badge st-over">Oltre UL</span>`;
+  if (e.status === 'info') return '';
   return `<span class="badge st-${e.status}" title="${STATUS_LABEL[e.status]}">${fmt(Math.min(e.pct, 999))}%</span>`;
 }
 
 const SOURCE_META = [
-  { key: 'diario', label: 'Diario (vegetali registrati)' },
-  { key: 'profilo', label: 'Carne, pesce, uova, latticini (stima dal profilo)' },
-  { key: 'integratori', label: 'Integratori' },
-  { key: 'altro', label: 'Sale iodato e sole (stima)' },
+  { key: 'diario', label: 'Diario (vegetali registrati)', short: 'Diario' },
+  { key: 'profilo', label: 'Carne, pesce, uova, latticini (stima dal profilo)', short: 'Profilo' },
+  { key: 'integratori', label: 'Integratori', short: 'Integratori' },
+  { key: 'altro', label: 'Acqua, sale iodato e sole (stima)', short: 'Acqua/sale/sole' },
 ];
 
 function sourceBar(key, target, sources) {
@@ -228,7 +235,8 @@ function viewOggi() {
   const day = computeDay(state, key);
   const targets = getTargets(state.profile);
   const evals = evaluate(day.totals, targets, day.sources.integratori);
-  const reached = evals.filter(e => e.status === 'ok').length;
+  const reached = countReached(evals);
+  const essentials = TARGET_KEYS.length;
 
   const dateNav = `<div class="datenav">
     <button class="icon-btn" data-action="date-prev" aria-label="Giorno precedente">‹</button>
@@ -258,7 +266,7 @@ function viewOggi() {
     <section class="summary">
       ${ring('Frutta e verdura', day.groups.fv / 400, fmt(Math.min(999, (day.groups.fv / 400) * 100)) + '%', `${fmt(day.groups.fv)} / 400 g`)}
       ${ring('Fibre', day.totals.fibre / targets.fibre, fmt(Math.min(999, (day.totals.fibre / targets.fibre) * 100)) + '%', `${fmt(day.totals.fibre, 1)} / ${targets.fibre} g`)}
-      ${ring('Obiettivi', reached / evals.length, `${reached}`, `su ${evals.length} nutrienti`)}
+      ${ring('Obiettivi', reached / essentials, `${reached}`, `su ${essentials} nutrienti`)}
     </section>
     <a class="btn primary block checkin-cta" href="#/checkin">Check-in guidato · 6 domande</a>
     <section class="card picker">
@@ -321,13 +329,16 @@ function nutrientDetail(e, data) {
 function nutrientRow(e, data) {
   const open = ui.open === e.key;
   const div = e.div || 1;
-  return `<div class="nrow ${open ? 'open' : ''}">
+  const value = e.target
+    ? `${fmt(e.value / div, e.dp)} <small>/ ${fmt(e.target / div, e.dp)} ${e.unit}</small>`
+    : `${fmt(e.value / div, e.dp)} <small>${e.unit}/die</small>`;
+  return `<div class="nrow ${open ? 'open' : ''} kind-${e.kind}">
     <button class="nrow-btn" data-action="toggle" data-key="${e.key}" aria-expanded="${open}">
-      <span class="nname">${esc(e.name)}</span>
-      <span class="nval">${fmt(e.value / div, e.dp)} <small>/ ${fmt(e.target / div, e.dp)} ${e.unit}</small></span>
+      <span class="nname">${esc(e.name)}${e.benefit ? `<small class="benefit">${esc(e.benefit)}</small>` : ''}</span>
+      <span class="nval">${value}</span>
       ${badge(e)}
     </button>
-    ${sourceBar(e.key, e.target, data.sources)}
+    ${e.target ? sourceBar(e.key, e.target, data.sources) : ''}
     ${open ? nutrientDetail(e, data) : ''}
   </div>`;
 }
@@ -347,45 +358,51 @@ function groupRow(g, scopeLabel) {
   </div>`;
 }
 
+const RANGE_DAYS = { settimana: 7, mese: 30 };
+
 function viewAnalisi() {
-  const week = ui.anMode === 'settimana';
+  const days = RANGE_DAYS[ui.anMode];
+  const range = !!days;
   const targets = getTargets(state.profile);
   const wk = computeWeek(state, ui.date);
-  const data = week ? wk : computeDay(state, ui.date);
+  const rng = range ? computeWeek(state, ui.date, days) : null;
+  const data = range ? rng : computeDay(state, ui.date);
   const evals = evaluate(data.totals, targets, data.sources.integratori);
-  const groups = evaluateGroups(week
-    ? { daily: wk.groups, dailyDays: wk.loggedDays, week: wk.groups, weekDays: wk.loggedDays }
+  const groups = evaluateGroups(range
+    ? { daily: rng.groups, dailyDays: rng.loggedDays, week: rng.groups, weekDays: rng.loggedDays }
     : { daily: data.groups, dailyDays: 1, week: wk.groups, weekDays: wk.loggedDays });
   const counts = { ok: 0, quasi: 0, basso: 0 };
-  evals.forEach(e => counts[e.status]++);
-  const low = evals.filter(e => e.status === 'basso');
+  const essentials = evals.filter(e => e.kind === 'target');
+  essentials.forEach(e => counts[e.status]++);
+  const low = essentials.filter(e => e.status === 'basso');
 
-  const sub = week
-    ? wk.loggedDays ? `Media di ${wk.loggedDays} ${plural(wk.loggedDays, 'giorno registrato', 'giorni registrati')} su 7` : 'Nessun giorno registrato negli ultimi 7'
+  const sub = range
+    ? rng.loggedDays ? `Media di ${rng.loggedDays} ${plural(rng.loggedDays, 'giorno registrato', 'giorni registrati')} su ${days}` : `Nessun giorno registrato negli ultimi ${days}`
     : esc(dayLabel(ui.date));
-  const emptyNote = (week ? !wk.loggedDays : !data.logged)
-    ? `<div class="note">Nessun vegetale registrato: vedi solo la stima dal profilo (carne, pesce, latticini, integratori). <a href="#/checkin">Fai il check-in ›</a></div>`
+  const emptyNote = (range ? !rng.loggedDays : !data.logged)
+    ? `<div class="note">Nessun vegetale registrato: vedi solo la stima dal profilo (carne, pesce, latticini, acqua, integratori). <a href="#/checkin">Fai il check-in ›</a></div>`
     : '';
-  const scopeLabel = g => (g.kind === 'weekly' ? '· 7 gg' : week ? '· media' : '');
+  const scopeLabel = g => (g.kind === 'weekly' ? `· ${days || 7} gg` : range ? '· media' : '');
 
   return `
     ${pageHead('Analisi', sub)}
-    ${segmented('an-mode', ui.anMode, [['giorno', 'Giorno'], ['settimana', 'Ultimi 7 giorni']])}
+    ${segmented('an-mode', ui.anMode, [['giorno', 'Giorno'], ['settimana', '7 giorni'], ['mese', '30 giorni']])}
     ${emptyNote}
     <section class="card score">
-      <div class="score-main"><b>${counts.ok}</b><span>/ ${evals.length}</span></div>
+      <div class="score-main"><b>${counts.ok}</b><span>/ ${essentials.length}</span></div>
       <div class="score-text">
-        <div>obiettivi raggiunti</div>
+        <div>nutrienti essenziali raggiunti</div>
         <div class="score-pills"><span class="pill st-quasi">${counts.quasi} quasi</span><span class="pill st-basso">${counts.basso} bassi</span></div>
       </div>
     </section>
     ${low.length ? `<div class="lowlist"><span class="muted small">Da migliorare:</span> ${low.map(e => `<span class="chip">${esc(e.short)}</span>`).join('')} <a class="small" href="#/consigli">Cosa mangiare ›</a></div>` : ''}
-    <div class="legend">${SOURCE_META.map(s => `<span><i class="dot src-${s.key}"></i>${s.key === 'profilo' ? 'Profilo' : s.key === 'altro' ? 'Sale/sole' : s.label.split(' (')[0]}</span>`).join('')}</div>
+    <div class="legend">${SOURCE_META.map(s => `<span><i class="dot src-${s.key}"></i>${s.short}</span>`).join('')}</div>
     ${NUTRIENT_GROUPS.map(g => `
       <section class="card">
         <h2>${g.label}</h2>
         ${g.intro ? `<p class="intro">${esc(g.intro)}</p>` : ''}
         ${evals.filter(e => e.group === g.key).map(e => nutrientRow(e, data)).join('')}
+        ${g.key === 'specifici' ? '<a class="more-link" href="#/integratori">Integratori e nutraceutici: cosa dicono le prove ›</a>' : ''}
       </section>`).join('')}
     <section class="card">
       <h2>Gruppi alimentari protettivi</h2>
@@ -443,6 +460,7 @@ function viewConsigli() {
     ${picks}
     ${cards.length ? `<h2 class="section-title">Per il tuo profilo</h2>${cards.map(c => `
       <article class="advice lvl-${c.level}"><h3>${esc(c.title)}</h3><p>${esc(c.text)}</p></article>`).join('')}` : ''}
+    <a class="card link-card" href="#/integratori"><div><h2>Integratori e nutraceutici</h2><p class="small muted">Creatina, omega-3, colina, citicolina, curcumina e altri: quale beneficio, per chi, a che dose</p></div><span class="chev">›</span></a>
     <p class="disclaimer">Consigli generali di prevenzione basati su linee guida e letteratura scientifica: non sostituiscono il parere del medico o del dietista, in particolare in caso di malattie, gravidanza o farmaci.</p>`;
 }
 
@@ -451,14 +469,18 @@ function viewConsigli() {
 function profileSummary(p) {
   const diet = dietOf(p);
   const freq = allowedAnimal(p)
-    .filter(a => Number(p.freq?.[a.key]) > 0)
-    .map(a => `${a.label} ${fmt(p.freq[a.key], 1)}/${a.per === 'giorno' ? 'die' : 'sett.'}`);
+    .map(a => ({ a, f: freqOf(p, a) }))
+    .filter(({ f }) => f.n > 0)
+    .map(({ a, f }) => `${a.label} ${fmt(f.n, 1)}/${PERIODS.find(x => x.key === f.per).short}`);
   const supp = SUPPLEMENTS.filter(s => p.integratori?.[s.key] > 0).map(s => `${s.label} ${fmt(p.integratori[s.key], 1)} ${s.unit}`);
   const cond = p.sesso === 'F' && p.condizione !== 'nessuna' ? CONDITIONS.find(c => c.key === p.condizione)?.label : '';
+  const water = waterMinerals(p);
+  const waterType = WATER.find(w => w.key === p.acqua?.tipo);
   const rows = [
-    ['Chi sei', `${p.sesso === 'F' ? 'Donna' : 'Uomo'}, ${p.eta} anni${cond ? ` · ${cond}` : ''}${p.fumo ? ' · fumatore' : ''}`],
+    ['Chi sei', `${p.sesso === 'F' ? 'Donna' : 'Uomo'}, ${p.eta} anni${cond ? ` · ${cond}` : ''}${p.fumo ? ' · fumatore' : ''}${p.forza ? ' · allenamento di forza' : ''}`],
     ['Alimentazione', diet.label],
     ['Frequenze', freq.join(' · ') || 'Nessun alimento animale'],
+    ['Acqua', water.litri ? `${fmt(water.litri, 1)} L/die · ${waterType?.key === 'etichetta' ? `calcio ${fmt(water.perL.calcio)} e magnesio ${fmt(water.perL.magnesio)} mg/L` : waterType?.label || ''} → ${fmt(water.calcio)} mg di calcio, ${fmt(water.magnesio)} mg di magnesio` : 'Non indicata'],
     ['Sole (apr–set)', SUN.find(s => s.key === p.sole)?.label],
     ['Sale iodato', SALT.find(s => s.key === p.sale)?.label],
     ['Integratori', supp.join(' · ') || 'Nessuno'],
@@ -510,6 +532,7 @@ function viewProfilo() {
       </div>
       <input type="file" id="import-file" accept="application/json,.json" hidden>
     </section>
+    <a class="card link-card" href="#/integratori"><div><h2>Integratori e nutraceutici</h2><p class="small muted">Quale beneficio, per chi, a che dose</p></div><span class="chev">›</span></a>
     <a class="card link-card" href="#/info"><div><h2>Metodo, fonti e limiti</h2><p class="small muted">Da dove vengono obiettivi, dati e consigli</p></div><span class="chev">›</span></a>
     <p class="disclaimer">MicroNutri è uno strumento educativo di prevenzione. Le stime sono approssimate e non sostituiscono esami, diagnosi o il parere di un professionista sanitario.</p>`;
 }
@@ -521,18 +544,22 @@ function viewInfo() {
     ${pageHead('Metodo e fonti', '', `<a class="icon-btn" href="${state.profile ? '#/profilo' : '#/benvenuto'}" aria-label="Indietro">‹</a>`)}
     <article class="card prose">
       <h2>Come funziona la stima</h2>
-      <p>Ogni giorno registri solo gli alimenti vegetali: frutta, verdura, legumi, cereali, frutta secca e semi, più olio, cacao, tè e caffè. Carne, pesce, uova e latticini li stimiamo dalle frequenze settimanali del profilo, perché variano poco e chiederli ogni giorno sarebbe faticoso. A questi si aggiungono integratori, sale iodato e, da aprile a settembre, una stima prudente della vitamina D prodotta al sole.</p>
+      <p>Ogni giorno registri solo gli alimenti vegetali: frutta, verdura, legumi, cereali, frutta secca e semi, più olio, cacao, tè e caffè. Carne, pesce, uova e latticini li stimiamo dalle frequenze del profilo (al giorno, a settimana, ogni 2 settimane o al mese), perché variano poco e chiederli ogni giorno sarebbe faticoso. A questi si aggiungono integratori, sale iodato, calcio e magnesio dell'acqua che bevi e, da aprile a settembre, una stima prudente della vitamina D prodotta al sole.</p>
+      <p>Per l'acqua usiamo valori tipici per tipo (un'oligominerale ha circa 35 mg/L di calcio e 8 di magnesio: con 1,5 litri sono circa 50 mg di calcio, il 5% del fabbisogno) oppure quelli dell'etichetta, se li inserisci. Un'acqua ricca di calcio può darne 300–500 mg al giorno, assorbiti come quelli del latte.</p>
       <p>Nel calcolo: per le verdure di solito cotte la vitamina C è ridotta del 30% e i folati del 25%; il calcio di spinaci e bietole è conteggiato al 20% per via degli ossalati; le patate non contano come porzione di frutta e verdura e la frutta essiccata vale tre volte il suo peso.</p>
 
       <h2>Obiettivi</h2>
-      <p>Vitamine e minerali seguono i <b>LARN 2014</b> della Società Italiana di Nutrizione Umana (PRI o AI per adulti), adattati a sesso, età, gravidanza e allattamento. Per chi segue una dieta vegetariana o vegana l'obiettivo del ferro è moltiplicato per 1,8 e quello dello zinco per 1,5, come indicato dall'Institute of Medicine per la minore biodisponibilità. Per chi fuma la vitamina C sale di 35 mg.</p>
-      <p>Il PRI è pensato per coprire il fabbisogno di quasi tutta la popolazione (97,5%): è un obiettivo prudente, non una soglia di carenza. Per questo conviene guardare soprattutto la media degli ultimi 7 giorni.</p>
+      <p>Vitamine e minerali seguono i <b>LARN 2014</b> della Società Italiana di Nutrizione Umana (PRI o AI per adulti), adattati a sesso, età, gravidanza e allattamento; per la colina, assente nei LARN, usiamo il valore EFSA (400 mg). Per chi segue una dieta vegetariana o vegana l'obiettivo del ferro è moltiplicato per 1,8 e quello dello zinco per 1,5, come indicato dall'Institute of Medicine per la minore biodisponibilità. Per chi fuma la vitamina C sale di 35 mg.</p>
+      <p>Il PRI è pensato per coprire il fabbisogno di quasi tutta la popolazione (97,5%): è un obiettivo prudente, non una soglia di carenza. Per questo conviene guardare soprattutto la media degli ultimi 7 o 30 giorni.</p>
+      <p>Solo i nutrienti essenziali contano negli "obiettivi raggiunti". Beta-glucani, flavanoli del cacao e polifenoli dell'olio sono confrontati con la dose a cui è dimostrato un effetto preciso (per esempio sul colesterolo LDL); polifenoli totali, carotenoidi, antociani, catechine, curcumina e creatina sono mostrati senza un fabbisogno, perché non esiste una loro carenza.</p>
       <p>Non monitoriamo niacina, acido pantotenico, biotina, fosforo, rame e manganese: la carenza è rarissima con qualsiasi dieta.</p>
 
       <h2>Livelli di evidenza</h2>
       <p>${evidenceTag('ref')} fabbisogno ufficiale (LARN, EFSA, IOM).</p>
-      <p>${evidenceTag('mod')} obiettivo da meta-analisi o grandi studi di coorte (frutta e verdura, cereali integrali, legumi, frutta secca, polifenoli).</p>
-      <p>${evidenceTag('lim')} obiettivo indicativo da studi osservazionali o con dati di composizione incerti (luteina, licopene, varietà vegetale, crucifere, frutti di bosco).</p>
+      <p>${evidenceTag('alta')} effetto specifico dimostrato da studi controllati, a una dose definita (beta-glucani, flavanoli del cacao, polifenoli dell'olio, creatina con allenamento).</p>
+      <p>${evidenceTag('mod')} obiettivo da meta-analisi o grandi studi di coorte (frutta e verdura, cereali integrali, legumi, frutta secca).</p>
+      <p>${evidenceTag('lim')} riferimento indicativo da studi osservazionali o con dati di composizione incerti (polifenoli, luteina, licopene, varietà vegetale, crucifere, frutti di bosco).</p>
+      <p>${evidenceTag('ins')} beneficio proposto ma non dimostrato in modo coerente (per esempio citicolina per la memoria, resveratrolo). Dettagli nella pagina <a href="#/integratori">Integratori e nutraceutici</a>.</p>
 
       <h2>Antiossidanti: cibi sì, integratori no</h2>
       <p>Le associazioni positive riguardano frutta, verdura, legumi e cereali integrali. Gli studi randomizzati sugli integratori di antiossidanti non hanno mostrato benefici sulla mortalità (revisione Cochrane, Bjelakovic 2012) e il beta-carotene ha aumentato il tumore al polmone nei fumatori (studi ATBC e CARET). L'app quindi non consiglia mai integratori antiossidanti.</p>
@@ -564,10 +591,50 @@ function viewInfo() {
     </article>`;
 }
 
+// ---------- Integratori e nutraceutici ----------
+
+const NUT_SECTIONS = [
+  { label: 'Benefici dimostrati, per persone e dosi precise', levels: ['ref', 'alta'] },
+  { label: 'Prove parziali', levels: ['mod', 'lim'] },
+  { label: 'Benefici non dimostrati', levels: ['ins'] },
+];
+
+function nutraceuticalCard(n) {
+  const sources = n.sources.map(s => (s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.label)}</a>` : esc(s.label))).join(' · ');
+  return `<article class="card nut">
+    <div class="card-head"><h3>${esc(n.name)}</h3>${evidenceTag(n.level)}</div>
+    <dl class="nut-dl">
+      <dt>Beneficio</dt><dd>${esc(n.benefit)}</dd>
+      <dt>Per chi</dt><dd>${esc(n.who)}</dd>
+      <dt>Dose</dt><dd>${esc(n.dose)}</dd>
+      <dt>Attenzione</dt><dd>${esc(n.caution)}</dd>
+    </dl>
+    ${sources ? `<p class="small muted">Fonti: ${sources}</p>` : ''}
+  </article>`;
+}
+
+function viewIntegratori() {
+  return `
+    ${pageHead('Integratori', 'Cosa dicono le prove', `<a class="icon-btn" href="#/consigli" aria-label="Indietro">‹</a>`)}
+    <div class="note">La domanda giusta non è "serve?", ma: <b>quale beneficio, in quale persona e a che dose</b>. Prima viene la dieta. Le carenze vere si correggono, possibilmente dopo gli esami; per molti integratori presi "per stare meglio" le prove mancano.</div>
+    ${NUT_SECTIONS.map(s => `
+      <h2 class="section-title">${s.label}</h2>
+      ${NUTRACEUTICALS.filter(n => s.levels.includes(n.level)).map(nutraceuticalCard).join('')}`).join('')}
+    <p class="disclaimer">Informazioni generali basate su EFSA, NIH e letteratura scientifica, non consigli personali. Prima di iniziare un integratore, soprattutto se hai malattie, sei in gravidanza o prendi farmaci, parlane con il medico o il farmacista.</p>`;
+}
+
 // ---------- Profilo guidato ----------
 
+const getPath = (obj, path) => path.split('.').reduce((o, k) => o?.[k], obj);
+function setPath(obj, path, value) {
+  const keys = path.split('.');
+  const last = keys.pop();
+  const target = keys.reduce((o, k) => (o[k] ??= {}), obj);
+  target[last] = value;
+}
+
 function opt(field, value, label, desc = '') {
-  const on = JSON.stringify(ui.draft[field]) === JSON.stringify(value);
+  const on = JSON.stringify(getPath(ui.draft, field)) === JSON.stringify(value);
   return `<button class="opt ${on ? 'on' : ''}" aria-pressed="${on}" data-action="ob-set" data-field="${field}" data-value='${esc(JSON.stringify(value))}'>
     <b>${esc(label)}</b>${desc ? `<span>${esc(desc)}</span>` : ''}</button>`;
 }
@@ -579,10 +646,10 @@ function obWelcome() {
     <p class="lead">Vitamine, minerali, fibre e composti protettivi di frutta, verdura, legumi e cereali, con obiettivi basati sulle evidenze scientifiche.</p>
     <ul class="features">
       <li><b>Un check-in al giorno.</b> La sera ti chiediamo cosa hai mangiato: bastano pochi tocchi.</li>
-      <li><b>Cosa hai coperto e cosa manca.</b> 23 nutrienti e 8 gruppi alimentari protettivi, oggi e in media settimanale.</li>
-      <li><b>Cosa mangiare.</b> Gli alimenti e le porzioni che colmano le tue lacune.</li>
+      <li><b>Cosa hai coperto e cosa manca.</b> ${TARGET_KEYS.length} nutrienti essenziali, composti bioattivi e 8 gruppi alimentari protettivi, per giorno, settimana e mese.</li>
+      <li><b>Cosa mangiare.</b> Gli alimenti e le porzioni che colmano le tue lacune, e cosa dicono le prove sugli integratori.</li>
     </ul>
-    <p class="note">Prima qualche domanda su di te: serve a stimare fabbisogni e apporti di carne, pesce e latticini senza chiederteli ogni giorno. I dati restano sul tuo dispositivo.</p>
+    <p class="note">Prima qualche domanda su di te: serve a stimare fabbisogni e apporti di carne, pesce, latticini e acqua senza chiederteli ogni giorno. I dati restano sul tuo dispositivo.</p>
   </div>`;
 }
 
@@ -594,18 +661,23 @@ function obChi(d) {
     <div class="field"><span class="label">Sesso biologico</span><div class="opts two">${opt('sesso', 'F', 'Donna')}${opt('sesso', 'M', 'Uomo')}</div></div>
     <div class="field"><label class="label" for="eta">Età</label><input id="eta" type="number" inputmode="numeric" min="18" max="110" value="${esc(d.eta)}" data-bind="eta"></div>
     <div class="field" id="cond-field" ${showCondition(d) ? '' : 'hidden'}><span class="label">Condizione</span><div class="opts two">${CONDITIONS.map(c => opt('condizione', c.key, c.label)).join('')}</div></div>
-    <div class="field"><span class="label">Fumi?</span><div class="opts two">${opt('fumo', false, 'No')}${opt('fumo', true, 'Sì')}</div></div>`;
+    <div class="field"><span class="label">Fumi?</span><div class="opts two">${opt('fumo', false, 'No')}${opt('fumo', true, 'Sì')}</div></div>
+    <div class="field"><span class="label">Fai allenamento di forza (pesi, macchine, corpo libero) almeno 2 volte a settimana?</span><div class="opts two">${opt('forza', false, 'No')}${opt('forza', true, 'Sì')}</div></div>`;
 }
 
-function freqRow(a, value) {
+function freqRow(a, f) {
   const step = a.step || 1;
-  const unit = a.per === 'giorno' ? 'al giorno' : a.unit ? `${a.unit}/sett.` : 'a settimana';
   return `<div class="freq">
     <div><div class="freq-name">${esc(a.label)}</div><div class="freq-hint">${esc(a.hint)}</div></div>
-    <div class="stepper">
-      <button class="step" data-action="freq" data-key="${a.key}" data-d="${-step}" aria-label="Meno ${esc(a.label)}" ${value > 0 ? '' : 'disabled'}>−</button>
-      <span class="qty">${fmt(value, 1)}<small>${unit}</small></span>
-      <button class="step plus" data-action="freq" data-key="${a.key}" data-d="${step}" aria-label="Più ${esc(a.label)}">+</button>
+    <div class="freq-ctrl">
+      <div class="stepper">
+        <button class="step" data-action="freq" data-key="${a.key}" data-d="${-step}" aria-label="Meno ${esc(a.label)}" ${f.n > 0 ? '' : 'disabled'}>−</button>
+        <span class="qty">${fmt(f.n, 1)}</span>
+        <button class="step plus" data-action="freq" data-key="${a.key}" data-d="${step}" aria-label="Più ${esc(a.label)}">+</button>
+      </div>
+      <select class="period" data-freq-per="${a.key}" aria-label="Ogni quanto: ${esc(a.label)}">
+        ${PERIODS.map(p => `<option value="${p.key}" ${p.key === f.per ? 'selected' : ''}>${a.unit && p.key !== 'giorno' ? `${a.unit} ` : ''}${p.label}</option>`).join('')}
+      </select>
     </div>
   </div>`;
 }
@@ -613,24 +685,55 @@ function freqRow(a, value) {
 function obDieta(d) {
   const animals = allowedAnimal(d);
   return `<h2>Come mangi</h2>
-    <p class="intro">Carne, pesce, uova e latticini non te li chiederemo ogni giorno: ci basta una stima della settimana tipo.</p>
+    <p class="intro">Carne, pesce, uova e latticini non te li chiederemo ogni giorno: ci basta sapere quanto spesso li mangi.</p>
     <div class="opts">${DIETS.map(x => opt('dieta', x.key, x.label, x.desc)).join('')}</div>
-    ${animals.length ? `<div class="field"><span class="label">Quante porzioni in una settimana tipo?</span>${animals.map(a => freqRow(a, Number(d.freq[a.key]) || 0)).join('')}</div>` : '<p class="note">Con una dieta vegana fai particolare attenzione a B12, vitamina D, calcio, iodio, omega-3, ferro e zinco: l\'app li evidenzierà.</p>'}`;
+    ${animals.length ? `<div class="field"><span class="label">Quante porzioni, e ogni quanto?</span><p class="small muted">Per ciò che mangi di rado scegli "ogni 2 settimane" o "al mese".</p>${animals.map(a => freqRow(a, freqOf(d, a))).join('')}</div>` : '<p class="note">Con una dieta vegana fai particolare attenzione a B12, vitamina D, calcio, iodio, omega-3, ferro, zinco e colina: l\'app li evidenzierà.</p>'}`;
+}
+
+function waterEstimate(d) {
+  const w = waterMinerals(d);
+  return w.litri ? `Con ${fmt(w.litri, 1)} litri al giorno: circa <b>${fmt(w.calcio)} mg di calcio</b> e <b>${fmt(w.magnesio)} mg di magnesio</b>.` : 'Nessun apporto stimato dall\'acqua.';
+}
+
+function suppRows(d, group) {
+  return SUPPLEMENTS.filter(s => s.group === group).map(s => {
+    const on = d.integratori[s.key] > 0;
+    return `<div class="supp ${on ? 'on' : ''}">
+      <label class="check"><input type="checkbox" data-supp-toggle="${s.key}" ${on ? 'checked' : ''}> ${esc(s.label)}</label>
+      ${on ? `<div class="supp-dose"><input type="number" inputmode="decimal" min="0" step="any" value="${esc(d.integratori[s.key])}" data-supp="${s.key}" aria-label="Dose ${esc(s.label)}"><span>${esc(s.unit)}</span></div>${s.hint ? `<p class="small muted">${esc(s.hint)}</p>` : ''}` : ''}
+    </div>`;
+  }).join('');
 }
 
 function obExtra(d) {
-  return `<h2>Sole e integratori</h2>
+  const tipo = d.acqua?.tipo;
+  return `<h2>Acqua, sole e integratori</h2>
+    <div class="field"><span class="label">Quanta acqua bevi al giorno?</span>
+      <div class="freq">
+        <div><div class="freq-name">Acqua</div><div class="freq-hint">in litri, comprese tisane</div></div>
+        <div class="stepper">
+          <button class="step" data-action="water" data-d="-0.5" aria-label="Meno acqua" ${d.acqua?.litri > 0 ? '' : 'disabled'}>−</button>
+          <span class="qty">${fmt(d.acqua?.litri || 0, 1)}<small>litri</small></span>
+          <button class="step plus" data-action="water" data-d="0.5" aria-label="Più acqua">+</button>
+        </div>
+      </div>
+    </div>
+    <div class="field"><span class="label">Che acqua bevi di solito?</span>
+      <div class="opts">${WATER.map(w => opt('acqua.tipo', w.key, w.label, w.desc)).join('')}</div>
+      ${tipo === 'etichetta' ? `<div class="water-label">
+        <label>Calcio <input type="number" inputmode="decimal" min="0" step="any" value="${esc(d.acqua.calcio ?? '')}" data-bind="acqua.calcio"> mg/L</label>
+        <label>Magnesio <input type="number" inputmode="decimal" min="0" step="any" value="${esc(d.acqua.magnesio ?? '')}" data-bind="acqua.magnesio"> mg/L</label>
+      </div>` : ''}
+      <p class="small muted" id="water-estimate">${waterEstimate(d)}</p>
+    </div>
     <div class="field"><span class="label">Da aprile a settembre, quanto tempo passi al sole con braccia o gambe scoperte nelle ore centrali?</span>
       <div class="opts">${SUN.map(s => opt('sole', s.key, s.label)).join('')}</div></div>
     <div class="field"><span class="label">Usi sale iodato?</span><div class="opts">${SALT.map(s => opt('sale', s.key, s.label)).join('')}</div></div>
     <div class="field"><span class="label">Integratori che prendi regolarmente</span>
-      ${SUPPLEMENTS.map(s => {
-        const on = d.integratori[s.key] > 0;
-        return `<div class="supp ${on ? 'on' : ''}">
-          <label class="check"><input type="checkbox" data-supp-toggle="${s.key}" ${on ? 'checked' : ''}> ${esc(s.label)}</label>
-          ${on ? `<div class="supp-dose"><input type="number" inputmode="decimal" min="0" step="any" value="${esc(d.integratori[s.key])}" data-supp="${s.key}" aria-label="Dose ${esc(s.label)}"><span>${esc(s.unit)}</span></div>${s.hint ? `<p class="small muted">${esc(s.hint)}</p>` : ''}` : ''}
-        </div>`;
-      }).join('')}
+      <p class="sublabel">Vitamine e minerali</p>
+      ${suppRows(d, 'vitamine')}
+      <p class="sublabel">Altri integratori</p>
+      ${suppRows(d, 'altri')}
     </div>`;
 }
 
@@ -721,14 +824,18 @@ const actions = {
   'ob-set': el => {
     const field = el.dataset.field;
     const value = JSON.parse(el.dataset.value);
-    ui.draft[field] = value;
-    if (field === 'dieta') ui.draft.freq = { ...dietOf(ui.draft).freq };
+    setPath(ui.draft, field, value);
+    if (field === 'dieta') ui.draft.freq = dietFreq(value);
     if (field === 'sesso' && value === 'M') ui.draft.condizione = 'nessuna';
   },
   freq: el => {
     const a = ANIMAL.find(x => x.key === el.dataset.key);
-    const cur = Number(ui.draft.freq[a.key]) || 0;
-    ui.draft.freq[a.key] = Math.max(0, Math.min(a.max || 21, cur + Number(el.dataset.d)));
+    const cur = freqOf(ui.draft, a);
+    ui.draft.freq[a.key] = { ...cur, n: Math.max(0, Math.min(30, cur.n + Number(el.dataset.d))) };
+  },
+  water: el => {
+    const cur = Number(ui.draft.acqua?.litri) || 0;
+    setPath(ui.draft, 'acqua.litri', Math.max(0, Math.min(5, cur + Number(el.dataset.d))));
   },
   'ob-next': () => {
     if (ui.step === 1) {
@@ -794,15 +901,20 @@ app.addEventListener('input', e => {
     document.getElementById('foodlist').innerHTML = foodList();
     document.querySelectorAll('.cat').forEach(b => b.classList.toggle('on', !ui.search && b.dataset.cat === ui.cat));
   } else if (el.dataset.bind) {
-    ui.draft[el.dataset.bind] = el.type === 'number' ? Number(el.value) : el.value;
+    setPath(ui.draft, el.dataset.bind, el.type === 'number' ? Number(el.value) : el.value);
     const cond = document.getElementById('cond-field');
     if (cond) cond.hidden = !showCondition(ui.draft);
+    const water = document.getElementById('water-estimate');
+    if (water) water.innerHTML = waterEstimate(ui.draft);
   }
 });
 
 app.addEventListener('change', async e => {
   const el = e.target;
-  if (el.dataset.suppToggle) {
+  if (el.dataset.freqPer) {
+    const a = ANIMAL.find(x => x.key === el.dataset.freqPer);
+    ui.draft.freq[a.key] = { ...freqOf(ui.draft, a), per: el.value };
+  } else if (el.dataset.suppToggle) {
     const s = SUPPLEMENTS.find(x => x.key === el.dataset.suppToggle);
     if (el.checked) ui.draft.integratori[s.key] = s.dose;
     else delete ui.draft.integratori[s.key];
@@ -821,6 +933,7 @@ app.addEventListener('change', async e => {
       if (!isValidBackup(data)) throw new Error('formato');
       if (!confirm('Sostituire i dati attuali con quelli del backup?')) return;
       state = { ...defaultState(), ...data, settings: { ...defaultState().settings, ...(data.settings || {}) } };
+      state.profile = normalizeProfile(state.profile);
       persist();
       reschedule();
       toast('Backup importato');

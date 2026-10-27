@@ -1,6 +1,6 @@
 // Service worker: funzionamento offline (rete prima, cache come riserva) e apertura dal promemoria.
 
-const CACHE = 'micronutri-v1';
+const CACHE = 'micronutri-v2';
 const SHELL = [
   './',
   'index.html',
@@ -14,6 +14,7 @@ const SHELL = [
   'js/data/foods.js',
   'js/data/nutrients.js',
   'js/data/profile.js',
+  'js/data/nutraceuticals.js',
   'icons/icon.svg',
   'icons/icon-192.png',
   'icons/icon-512.png',
